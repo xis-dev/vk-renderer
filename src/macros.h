@@ -7,8 +7,8 @@
 #define VK_CHECK(x) \
     do  \
     {   \
-        VkResult result = x;\
-        if (result != VK_SUCCESS) { \
-        std::cout << std::format("VULKAN FOUND ERROR: {}", string_VkResult(result)); \
+        VkResult VK_CHECK_RESULT = x;\
+        if (VK_CHECK_RESULT != VK_SUCCESS){\
+        std::cerr << std::format("VULKAN FOUND ERROR: {}\n", string_VkResult(VK_CHECK_RESULT)); \
         abort();}\
 } while (0)

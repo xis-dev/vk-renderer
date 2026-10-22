@@ -8,6 +8,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY  ${PROJECT_SOURCE_DIR}/lib)
 
+include (${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/shader_compile.cmake)
+
+
 find_package(Vulkan REQUIRED)
 
 include(FetchContent)
@@ -38,7 +41,7 @@ FetchContent_MakeAvailable(volk)
 
 FetchContent_Declare(
         vma
-        GIT_TAG3.4.0
+        GIT_TAG v3.4.0
         GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
         GIT_SHALLOW TRUE
 )
@@ -56,8 +59,8 @@ FetchContent_MakeAvailable(glm)
 
 add_executable(${PROJECT_NAME} src/main.cpp
         src/engine.cpp
-        src/engine.h
-        src/utility.h)
+        src/pipeline_builder.cpp
+        src/mesh.cpp)
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE "$<$<CONFIG:Debug>:DEBUG_MODE>")
 
@@ -67,9 +70,15 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
-        Vulkan::Vulkan
         SDL3::SDL3-static
         GPUOpen::VulkanMemoryAllocator
         glm::glm
         volk::volk
 )
+
+add_shaders(SHADERS
+        assets/shaders/triangle.frag
+        assets/shaders/triangle.vert
+)
+
+add_dependencies(${PROJECT_NAME} SHADERS)
