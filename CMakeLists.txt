@@ -7,10 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY  ${PROJECT_SOURCE_DIR}/lib)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include (${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/shader_compile.cmake)
-
-
 find_package(Vulkan REQUIRED)
 
 include(FetchContent)
