@@ -6,6 +6,7 @@
 
 #include <array>
 
+#include "mesh.h"
 #include "utility.h"
 
 inline void transition_image_layout(
@@ -17,6 +18,15 @@ inline void transition_image_layout(
     VkAccessFlags2 dstAccessMask,
     VkPipelineStageFlags2 srcStageMask,
     VkPipelineStageFlags2 dstStageMask);
+
+
+constexpr int MAX_FRAMES_IN_FLIGHT = 2;
+struct Frame {
+    VkCommandBuffer commandBuffer;
+    // Signal on presentation finished
+    VkSemaphore presentSemaphore;
+    VkFence drawFence;
+};
 
 class Engine {
     // Vulkan instance objects
@@ -36,6 +46,7 @@ class Engine {
     std::vector<VkImage> m_swapchainImages{};
     std::vector<VkImageView> m_swapchainImageViews{};
     std::vector<VkResult> m_swapchainResults{};
+    std::vector<VkSemaphore> m_swapchainRenderSemaphores{};
     VkExtent2D m_swapchainExtent{};
 
 
@@ -48,15 +59,30 @@ class Engine {
 
     // Commands
     VkCommandPool m_commandPool{nullptr};
-    VkCommandBuffer m_commandBuffer{nullptr};
-
-    // Sync objects=
-    VkSemaphore m_presentSemaphore{nullptr};
-    VkSemaphore m_renderSemaphore{nullptr};
-    VkFence m_drawFence{nullptr};
 
     // Buffers
     VkBuffer m_vertexBuffer{};
+
+    std::vector<Frame> m_frames{MAX_FRAMES_IN_FLIGHT};
+    uint32_t frameCount{0};
+    // Vert buffer array
+    std::vector<Vertex> vertices {
+        Vertex{
+            .position = {-0.5f, 0.5f, 0.0f},
+            .color = {1.0f, 0.0f, 0.0f}
+        },
+
+        Vertex{
+            .position = {0.0f, -0.5f, 0.0f},
+            .color = {0.0f, 1.0f, 0.0f}
+        },
+
+        Vertex{
+            .position = {0.5f, 0.5f, 0.0f},
+            .color = {0.0f, 0.0f, 1.0f}
+        },
+    };
+
     bool m_bStopRendering{};
 public:
     void init(int w, int h);
@@ -76,6 +102,7 @@ private:
     void init_commands();
     void init_syncObjects();
 
+    uint32_t getCurrentFrame() const;
 
     void draw();
 

@@ -79,7 +79,6 @@ void Engine::run()
     bool running = true;
     SDL_Event e;
 
-    int frames = 0;
     while (running)
     {
         // SDL Event handling
@@ -111,11 +110,16 @@ void Engine::run()
 
         // Render draws
         draw();
+
+        ++frameCount;
     }
 }
 
 void Engine::cleanup()
 {
+
+    // Wait till the gpu is completely finished
+    vkQueueWaitIdle(m_mainQueueWithIndex.first);
 
     m_mainDeletionQueue.flush();
 
@@ -337,7 +341,7 @@ void Engine::init_allocator()
         .vkGetDeviceProcAddr = vkGetDeviceProcAddr,
     };
 
-    VmaAllocatorCreateInfo allocInfo {
+    VmaAllocatorCreateInfo allocatorInfo {
         .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
         .physicalDevice = m_physicalDevice,
         .device = m_device,
@@ -345,13 +349,36 @@ void Engine::init_allocator()
         .instance = m_instance
     };
 
-    VK_CHECK(vmaCreateAllocator(&allocInfo, &m_allocator));
+    VK_CHECK(vmaCreateAllocator(&allocatorInfo, &m_allocator));
 
     VkBufferCreateInfo bufferInfo {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size =
-    }
-    vmaCreateBuffer(m_allocator, )
+        .size = sizeof(Vertex) * vertices.size(),
+        .usage =  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 1,
+        .pQueueFamilyIndices = &m_mainQueueWithIndex.second,
+    };
+
+    VmaAllocationCreateInfo allocationInfo {
+        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+            VMA_ALLOCATION_CREATE_HOST_ACCESS_ALLOW_TRANSFER_INSTEAD_BIT |
+        VMA_ALLOCATION_CREATE_MAPPED_BIT,
+
+        .usage = VMA_MEMORY_USAGE_AUTO,
+    };
+
+    VmaAllocation vmaAllocation {nullptr};
+    VmaAllocationInfo vmaAllocationInfo{};
+    VK_CHECK(vmaCreateBuffer(m_allocator, &bufferInfo, &allocationInfo, &m_vertexBuffer, &vmaAllocation, &vmaAllocationInfo));
+
+    memcpy(vmaAllocationInfo.pMappedData, vertices.data(), sizeof(Vertex) * vertices.size());
+
+    m_mainDeletionQueue.pushFunction([&]() {
+        vmaDestroyBuffer(m_allocator, m_vertexBuffer, vmaAllocation);
+
+        vmaDestroyAllocator(m_allocator);
+    });
 }
 
 void Engine::init_swapchain()
@@ -429,6 +456,7 @@ void Engine::init_swapchain()
     VK_CHECK(vkGetSwapchainImagesKHR(m_device, m_swapchain, &imageCount, m_swapchainImages.data()));
     m_swapchainImageViews.resize(imageCount);
     m_swapchainResults.resize(imageCount);
+    m_swapchainRenderSemaphores.resize(imageCount);
 
     VkImageViewCreateInfo viewInfo {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -507,8 +535,8 @@ void Engine::init_pipelines()
     // Depth/Stencil state
     VkPipelineDepthStencilStateCreateInfo dsInfo {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable = VK_TRUE,
-        .depthWriteEnable = VK_TRUE,
+        .depthTestEnable = VK_FALSE,
+        .depthWriteEnable = VK_FALSE,
         .depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL,
         .depthBoundsTestEnable = VK_FALSE,
         .stencilTestEnable = VK_FALSE,
@@ -616,7 +644,7 @@ void Engine::init_pipelines()
     // Empty pipeline for now
     VK_CHECK(vkCreatePipelineLayout(m_device, &layoutInfo, nullptr, &m_triangleLayout));
 
-    VkFormat colorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+    VkFormat colorFormat = VK_FORMAT_R8G8B8A8_SRGB;
 
     std::vector<VkFormat> depthFormats {
         VK_FORMAT_D32_SFLOAT_S8_UINT,
@@ -687,24 +715,21 @@ void Engine::init_commands() {
 
     VK_CHECK(vkCreateCommandPool(m_device, &commandPoolInfo, nullptr, &m_commandPool));
 
-
-     VkCommandBufferAllocateInfo allocInfo{
+    VkCommandBufferAllocateInfo allocInfo{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
          .commandPool = m_commandPool,
          .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
          .commandBufferCount = 1
      };
 
-    vkAllocateCommandBuffers(m_device, &allocInfo, &m_commandBuffer);
+    // Create command buffer for each frame
+    for (auto& frame: m_frames) {
+        vkAllocateCommandBuffers(m_device, &allocInfo, &frame.commandBuffer);
+    }
 
-    // Command buffer recording
-
-    VkCommandBufferBeginInfo beginInfo{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
-    };
-
-    vkBeginCommandBuffer(m_commandBuffer, &beginInfo);
-
+    m_mainDeletionQueue.pushFunction([&]() {
+        vkDestroyCommandPool(m_device, m_commandPool, nullptr);
+    });
 }
 
 void Engine::init_syncObjects() {
@@ -714,45 +739,76 @@ void Engine::init_syncObjects() {
         .flags = VK_FENCE_CREATE_SIGNALED_BIT,
     };
 
-    vkCreateFence(m_device, &fenceInfo, nullptr, &m_drawFence);
-
     // No pNext of VkSemaphoreTYpeCreateInfo, defaults to binary semaphore
     VkSemaphoreCreateInfo semaphoreInfo {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
     };
 
-    vkCreateSemaphore(m_device, &semaphoreInfo, nullptr, &m_presentSemaphore);
-    vkCreateSemaphore(m_device, &semaphoreInfo, nullptr, &m_renderSemaphore);
+    for (auto& frame : m_frames) {
+        VK_CHECK(vkCreateFence(m_device, &fenceInfo, nullptr, &frame.drawFence));
+        VK_CHECK(vkCreateSemaphore(m_device, &semaphoreInfo, nullptr, &frame.presentSemaphore));
+    }
+
+    // Swapchain image render semaphores
+    for (auto& semaphore: m_swapchainRenderSemaphores) {
+        VK_CHECK(vkCreateSemaphore(m_device, &semaphoreInfo, nullptr, &semaphore));
+    }
 
     m_mainDeletionQueue.pushFunction([&]() {
-        vkDestroySemaphore(m_device, m_renderSemaphore, nullptr);
-        vkDestroySemaphore(m_device, m_presentSemaphore, nullptr);
+        for (const auto& frame: m_frames) {
+            vkDestroySemaphore(m_device, frame.presentSemaphore, nullptr);
+            vkDestroyFence(m_device, frame.drawFence, nullptr);
+        }
 
-        vkDestroyFence(m_device, m_drawFence, nullptr);
-    });
+        for (const auto& semaphore: m_swapchainRenderSemaphores) {
+            vkDestroySemaphore(m_device, semaphore, nullptr);
+        }
+        });
 
+}
+
+uint32_t Engine::getCurrentFrame() const {
+    return frameCount % MAX_FRAMES_IN_FLIGHT;
 }
 
 void Engine::draw()
 {
-    auto fenceResult = vkWaitForFences(m_device, 1, &m_drawFence, VK_TRUE, UINT64_MAX);
+    auto currentFrame = m_frames[getCurrentFrame()];
+    auto fenceResult = vkWaitForFences(m_device, 1, &currentFrame.drawFence, VK_TRUE, UINT64_MAX);
     if (fenceResult != VK_SUCCESS) {
         throw std::runtime_error("Failed to wait for fences.\n");
     }
 
-    vkResetFences(m_device, 1, &m_drawFence);
+    vkResetFences(m_device, 1, &currentFrame.drawFence);
+
+    VkCommandBufferBeginInfo beginInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+    };
+
+    auto commandBuffer = currentFrame.commandBuffer;
+
+    // Begin recording
+    vkBeginCommandBuffer(commandBuffer, &beginInfo);
 
     uint32_t imageIdx{};
-    VK_CHECK(vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX, m_renderSemaphore, nullptr, &imageIdx));
+    VK_CHECK(vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX, currentFrame.presentSemaphore, nullptr, &imageIdx));
 
+    VkImage currentImage = m_swapchainImages[imageIdx];
+    VkImageView currentImageView = m_swapchainImageViews[imageIdx];
+    VkSemaphore currentRenderSemaphore = m_swapchainRenderSemaphores[imageIdx];
+
+    transition_image_layout(commandBuffer, currentImage,
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
 
     VkClearValue clear {
-        .color = {0.0f, 0.0f, 0.0f, 0.0f},
+        .color = {0.2f, 0.0f, 0.0f, 0.0f},
     };
 
     VkRenderingAttachmentInfo attachmentInfo {
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView = m_swapchainImageViews[imageIdx],
+        .imageView = currentImageView,
         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -761,14 +817,15 @@ void Engine::draw()
 
     VkRenderingInfo renderInfo {
         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea = {.extent = m_windowExtent},
         .layerCount = 1,
         .colorAttachmentCount = 1,
         .pColorAttachments = &attachmentInfo,
     };
 
-    vkCmdBeginRendering(m_commandBuffer, &renderInfo);
+    vkCmdBeginRendering(commandBuffer, &renderInfo);
 
-    vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_trianglePipeline);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_trianglePipeline);
 
     VkViewport viewport {
         .width = static_cast<float>(m_windowExtent.width),
@@ -779,36 +836,44 @@ void Engine::draw()
         .extent = m_windowExtent,
     };
 
-    vkCmdSetViewport(m_commandBuffer, 0, 1, &viewport);
-    vkCmdSetScissor(m_commandBuffer, 0, 1, &scissor);
+    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-    vkCmdBindVertexBuffers(m_commandBuffer, 0, 1,)
+    VkDeviceSize vertOffsets{0};
+    vkCmdBindVertexBuffers(commandBuffer, 0, 1, &m_vertexBuffer, &vertOffsets);
 
-    vkCmdDraw(m_commandBuffer, 3, 1, 0, 0);
+    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 
-    vkCmdEndRendering(m_commandBuffer);
+    vkCmdEndRendering(commandBuffer);
 
+
+    // Transition image layout for presentation
+    transition_image_layout(commandBuffer, currentImage,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, 0,  VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
+    // End recording
+    vkEndCommandBuffer(commandBuffer);
 
     // Submit command buffer
     VkPipelineStageFlags waitDestMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     const VkSubmitInfo submitInfo {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &m_presentSemaphore,
+        .pWaitSemaphores = &currentFrame.presentSemaphore,
         .pWaitDstStageMask = &waitDestMask,
         .commandBufferCount = 1,
-        .pCommandBuffers = &m_commandBuffer,
+        .pCommandBuffers = &commandBuffer,
         .signalSemaphoreCount = 1,
-        .pSignalSemaphores = &m_renderSemaphore,
+        .pSignalSemaphores = &currentRenderSemaphore,
     };
 
-    vkQueueSubmit(m_mainQueueWithIndex.first, 1, &submitInfo, m_drawFence);
+    vkQueueSubmit(m_mainQueueWithIndex.first, 1, &submitInfo, currentFrame.drawFence);
 
     // Present the result of the swapchain
     VkPresentInfoKHR presentInfo {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &m_renderSemaphore,
+        .pWaitSemaphores = &currentRenderSemaphore,
         .swapchainCount = 1,
         .pSwapchains = &m_swapchain,
         .pImageIndices = &imageIdx,
@@ -831,7 +896,7 @@ VkBool32 Engine::debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSev
 {
     std::cout << pCallbackData->pMessage << std::endl;
 
-    return false;
+    return VK_FALSE;
 }
 
 void Engine::setupDebugMessenger()
